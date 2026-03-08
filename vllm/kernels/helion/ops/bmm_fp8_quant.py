@@ -65,8 +65,8 @@ def bmm_fp8_quant_helion(
     N, B, _L = input.shape
     V = hl.specialize(weight.shape[2])
 
-    # Output in (B, N, V) layout — .view(B, N*V) is free (same memory)
-    out = torch.empty(B, N, V, device=input.device, dtype=torch.float8_e4m3fn)
+    # Output in (N, B, V) to match computation order (avoids in-kernel transpose)
+    out = torch.empty(N, B, V, device=input.device, dtype=torch.float8_e4m3fn)
 
     for tile_n, tile_b in hl.tile([N, B]):
         # Batched matmul: contract over L dimension
@@ -80,9 +80,10 @@ def bmm_fp8_quant_helion(
         scale_val = hl.load(scale, [0])
         result_scaled = (result_f32 * scale_val).clamp(-_FP8_MAX, _FP8_MAX)
 
-        out[tile_b, tile_n, :] = result_scaled.to(out.dtype)
+        out[tile_n, tile_b, :] = result_scaled.to(out.dtype)
 
-    return out
+    # Transpose to (B, N, V) — .view(B, N*V) gives correct head-interleaved layout
+    return out.permute(1, 0, 2).contiguous()
 
 
 @bmm_fp8_quant_helion.register_input_generator  # type: ignore[misc]

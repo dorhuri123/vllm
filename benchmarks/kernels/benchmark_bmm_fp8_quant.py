@@ -4,7 +4,7 @@
 Benchmark: Fused BMM+FP8 quant kernels vs separate BMM then FP8 quant.
 
 Measures the latency of the MLA _v_up_proj operation for decode:
-  - Baseline: torch.bmm + transpose + static_scaled_fp8_quant (3 ops)
+  - Baseline: torch.bmm + transpose + scaled_fp8_quant (3 ops)
   - Triton:   bmm_fp8_quant (single Triton kernel)
   - Helion:   bmm_fp8_quant_helion (single Helion kernel, if available)
 
@@ -14,7 +14,7 @@ Usage:
 
 import torch
 
-from vllm._custom_ops import static_scaled_fp8_quant
+from vllm._custom_ops import scaled_fp8_quant
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton as vllm_triton
 from vllm.utils.import_utils import has_helion
@@ -82,7 +82,7 @@ def benchmark(B, N, L, V, provider):
         def fn():
             bmm_result = torch.bmm(inp, weight)
             out_bf16[:] = bmm_result.transpose(0, 1).reshape(B, N * V)
-            static_scaled_fp8_quant(out_fp8, out_bf16, scale)
+            out_fp8[:], _ = scaled_fp8_quant(out_bf16, scale)
 
     elif provider == "triton":
 
