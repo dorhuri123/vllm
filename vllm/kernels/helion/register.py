@@ -219,7 +219,10 @@ class ConfiguredHelionKernel:
         from vllm.kernels.helion.utils import get_canonical_gpu_name
 
         self.platform = get_canonical_gpu_name()
-        config_manager = ConfigManager.get_instance()
+        try:
+            config_manager = ConfigManager.get_instance()
+        except RuntimeError:
+            config_manager = ConfigManager()
         self.configs = config_manager.get_platform_configs(self.op_name, self.platform)
 
         if not self.configs:
