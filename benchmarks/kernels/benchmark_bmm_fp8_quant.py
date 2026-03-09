@@ -46,57 +46,65 @@ if _helion_available:
     _styles.append(("red", "-"))
 
 
-@vllm_triton.testing.perf_report(
-    vllm_triton.testing.Benchmark(
-        x_names=["B"],
-        x_vals=[1, 4, 8, 16, 32, 64, 128, 256],
-        line_arg="provider",
-        line_vals=_line_vals,
-        line_names=_line_names,
-        styles=_styles,
-        ylabel="Time (ms)",
-        plot_name="bmm_fp8_quant_N{}_L{}_V{}".format(
-            N_HEADS[0], KV_LORA_RANK, V_HEAD_DIM
-        ),
-        args={
-            "N": N_HEADS[0],
-            "L": KV_LORA_RANK,
-            "V": V_HEAD_DIM,
-        },
+def _make_benchmark(n_heads):
+    @vllm_triton.testing.perf_report(
+        vllm_triton.testing.Benchmark(
+            x_names=["B"],
+            x_vals=[1, 4, 8, 16, 32, 64, 128, 256],
+            line_arg="provider",
+            line_vals=_line_vals,
+            line_names=_line_names,
+            styles=_styles,
+            ylabel="Time (ms)",
+            plot_name="bmm_fp8_quant_N{}_L{}_V{}".format(
+                n_heads, KV_LORA_RANK, V_HEAD_DIM
+            ),
+            args={
+                "N": n_heads,
+                "L": KV_LORA_RANK,
+                "V": V_HEAD_DIM,
+            },
+        )
     )
-)
-def benchmark(B, N, L, V, provider):
-    device = "cuda"
-    dtype = torch.bfloat16
-    fp8_dtype = current_platform.fp8_dtype()
+    def benchmark(B, N, L, V, provider):
+        device = "cuda"
+        dtype = torch.bfloat16
+        fp8_dtype = current_platform.fp8_dtype()
 
-    inp = torch.randn(N, B, L, dtype=dtype, device=device)
-    weight = torch.randn(N, L, V, dtype=dtype, device=device)
-    scale = torch.tensor([0.01], dtype=torch.float32, device=device)
+        inp = torch.randn(N, B, L, dtype=dtype, device=device)
+        weight = torch.randn(N, L, V, dtype=dtype, device=device)
+        scale = torch.tensor([0.01], dtype=torch.float32, device=device)
 
-    out_bf16 = torch.empty(B, N * V, dtype=dtype, device=device)
-    out_fp8 = torch.empty(B, N * V, dtype=fp8_dtype, device=device)
+        out_bf16 = torch.empty(B, N * V, dtype=dtype, device=device)
+        out_fp8 = torch.empty(B, N * V, dtype=fp8_dtype, device=device)
 
-    if provider == "baseline":
+        if provider == "baseline":
 
-        def fn():
-            bmm_result = torch.bmm(inp, weight)
-            out_bf16[:] = bmm_result.transpose(0, 1).reshape(B, N * V)
-            out_fp8[:], _ = scaled_fp8_quant(out_bf16, scale)
+            def fn():
+                bmm_result = torch.bmm(inp, weight)
+                out_bf16[:] = bmm_result.transpose(0, 1).reshape(B, N * V)
+                out_fp8[:], _ = scaled_fp8_quant(out_bf16, scale)
 
-    elif provider == "triton":
+        elif provider == "triton":
 
-        def fn():
-            bmm_fp8_quant(inp, weight, scale, out_fp8)
+            def fn():
+                bmm_fp8_quant(inp, weight, scale, out_fp8)
 
-    elif provider == "helion":
+        elif provider == "helion":
 
-        def fn():
-            bmm_fp8_quant_helion(inp, weight, scale)
+            def fn():
+                bmm_fp8_quant_helion(inp, weight, scale)
 
-    ms = vllm_triton.testing.do_bench_cudagraph(fn, rep=500)
-    return ms
+        ms = vllm_triton.testing.do_bench_cudagraph(fn, rep=500)
+        return ms
+
+    return benchmark
 
 
 if __name__ == "__main__":
-    benchmark.run(print_data=True)
+    for n in N_HEADS:
+        print(f"\n{'=' * 60}")
+        print(f"  N_HEADS={n}, KV_LORA_RANK={KV_LORA_RANK}, V_HEAD_DIM={V_HEAD_DIM}")
+        print(f"{'=' * 60}")
+        bench = _make_benchmark(n)
+        bench.run(print_data=True)
