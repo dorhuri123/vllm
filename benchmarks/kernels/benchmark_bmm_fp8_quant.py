@@ -94,10 +94,8 @@ def benchmark(B, N, L, V, provider):
         def fn():
             bmm_fp8_quant_helion(inp, weight, scale)
 
-    ms, min_ms, max_ms = vllm_triton.testing.do_bench_cudagraph(
-        fn, rep=500, return_mode="median"
-    )
-    return ms, min_ms, max_ms
+    ms = vllm_triton.testing.do_bench_cudagraph(fn, rep=500)
+    return ms
 
 
 if __name__ == "__main__":
