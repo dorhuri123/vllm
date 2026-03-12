@@ -209,12 +209,17 @@ def test_triton_vs_helion_consistency(B):
 
 
 def _reference_bmm_fp8_group(input_tensor, weight):
-    """Reference: torch.bmm then per-group (per-head) dynamic FP8 quant."""
+    """Reference: torch.bmm then per-group (per-head) dynamic FP8 quant.
+
+    Uses fp32 BMM to match Triton kernel's fp32 accumulation, avoiding
+    tf32 rounding differences on H100 that would cause scale mismatches.
+    """
     fp8_dtype = current_platform.fp8_dtype()
     N, B, _L = input_tensor.shape
     V = weight.shape[2]
 
-    ref_bmm = torch.bmm(input_tensor, weight)  # (N, B, V)
+    # Use fp32 BMM to match Triton's fp32 accumulation
+    ref_bmm = torch.bmm(input_tensor.float(), weight.float())  # (N, B, V)
     ref_bf16 = ref_bmm.transpose(0, 1)  # (B, N, V)
 
     _, fp8_max = get_fp8_min_max()
