@@ -206,7 +206,7 @@ def _make_group_benchmark(n_heads):
 if __name__ == "__main__":
     for n in N_HEADS:
         print(f"\n{'=' * 60}")
-        print(f"  Static per-tensor FP8")
+        print("  Static per-tensor FP8")
         print(f"  N_HEADS={n}, KV_LORA_RANK={KV_LORA_RANK}, V_HEAD_DIM={V_HEAD_DIM}")
         print(f"{'=' * 60}")
         bench = _make_static_benchmark(n)
@@ -218,7 +218,7 @@ if __name__ == "__main__":
 
     for n in N_HEADS:
         print(f"\n{'=' * 60}")
-        print(f"  Per-group FP8")
+        print("  Per-group FP8")
         print(f"  N_HEADS={n}, KV_LORA_RANK={KV_LORA_RANK}, V_HEAD_DIM={V_HEAD_DIM}")
         print(f"{'=' * 60}")
         bench = _make_group_benchmark(n)

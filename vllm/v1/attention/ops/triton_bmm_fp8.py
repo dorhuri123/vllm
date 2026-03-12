@@ -239,9 +239,7 @@ def _bmm_fp8_group_quant_kernel(
     a_ptrs = input_base + (
         offs_b[:, None] * stride_in_b + offs_l[None, :] * stride_in_l
     )
-    b_ptrs = weight_base + (
-        offs_l[:, None] * stride_w_l + offs_v[None, :] * stride_w_v
-    )
+    b_ptrs = weight_base + (offs_l[:, None] * stride_w_l + offs_v[None, :] * stride_w_v)
 
     # Accumulate BMM in fp32
     acc = tl.zeros((BLOCK_SIZE_B, BLOCK_SIZE_V), dtype=tl.float32)

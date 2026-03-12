@@ -702,13 +702,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 and not self.is_aiter_triton_fp8_bmm_enabled
             ):
                 # Per-group dynamic FP8 fused path
+                assert output_block_scale is not None
                 self._v_up_proj(
                     attn_out,
                     out=mqa_output_slice,
                     quant_output=quant_output[:num_mqa_tokens],
-                    output_group_scale=output_block_scale[
-                        :num_mqa_tokens
-                    ],
+                    output_group_scale=output_block_scale[:num_mqa_tokens],
                 )
                 mqa_fused = True
             elif (
@@ -742,9 +741,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     )
                     if _is_per_group_fp8:
                         # Per-group dynamic FP8 for MHA portion
-                        mha_scales = output_block_scale[
-                            num_mqa_tokens:num_actual_toks
-                        ]
+                        assert output_block_scale is not None
+                        mha_scales = output_block_scale[num_mqa_tokens:num_actual_toks]
                         fp8_info = torch.finfo(quant_output.dtype)
                         torch.ops._C.per_token_group_fp8_quant(
                             mha_actual,
@@ -960,9 +958,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 bmm_fp8_group_quant,
             )
 
-            bmm_fp8_group_quant(
-                x, self.W_UV, quant_output, output_group_scale
-            )
+            bmm_fp8_group_quant(x, self.W_UV, quant_output, output_group_scale)
             return
 
         # Fused BMM + static per-tensor FP8 quant path

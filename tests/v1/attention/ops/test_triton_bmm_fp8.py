@@ -225,9 +225,7 @@ def _reference_bmm_fp8_group(input_tensor, weight):
     scales = abs_max / fp8_max  # (B, N)
     inv_scales = fp8_max / abs_max  # (B, N)
 
-    ref_scaled = (ref_bf16.float() * inv_scales.unsqueeze(-1)).clamp(
-        -fp8_max, fp8_max
-    )
+    ref_scaled = (ref_bf16.float() * inv_scales.unsqueeze(-1)).clamp(-fp8_max, fp8_max)
     ref_fp8 = ref_scaled.reshape(B, N * V).to(fp8_dtype)
     return ref_fp8, scales
 
@@ -259,9 +257,7 @@ def test_triton_bmm_fp8_group_quant_correctness(B, dtype):
         fused_output.float(), ref_fp8.float(), atol=1.0, rtol=0.1
     )
     # Check scales match
-    torch.testing.assert_close(
-        fused_scales, ref_scales, atol=1e-6, rtol=1e-4
-    )
+    torch.testing.assert_close(fused_scales, ref_scales, atol=1e-6, rtol=1e-4)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
@@ -347,17 +343,11 @@ def test_helion_bmm_fp8_group_quant_correctness(B, dtype):
 
     ref_fp8, ref_scales = _reference_bmm_fp8_group(input_tensor, weight)
 
-    helion_out, helion_scales = bmm_fp8_group_quant_helion(
-        input_tensor, weight
-    )
+    helion_out, helion_scales = bmm_fp8_group_quant_helion(input_tensor, weight)
     helion_flat = helion_out.reshape(B, N * V)
 
-    torch.testing.assert_close(
-        helion_flat.float(), ref_fp8.float(), atol=1.0, rtol=0.1
-    )
-    torch.testing.assert_close(
-        helion_scales, ref_scales, atol=1e-6, rtol=1e-4
-    )
+    torch.testing.assert_close(helion_flat.float(), ref_fp8.float(), atol=1.0, rtol=0.1)
+    torch.testing.assert_close(helion_scales, ref_scales, atol=1e-6, rtol=1e-4)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
@@ -419,14 +409,10 @@ def test_triton_vs_helion_group_quant_consistency(B):
     bmm_fp8_group_quant(input_tensor, weight, triton_out, triton_scales)
 
     # Helion
-    helion_out, helion_scales = bmm_fp8_group_quant_helion(
-        input_tensor, weight
-    )
+    helion_out, helion_scales = bmm_fp8_group_quant_helion(input_tensor, weight)
     helion_flat = helion_out.reshape(B, N * V)
 
     torch.testing.assert_close(
         triton_out.float(), helion_flat.float(), atol=1.0, rtol=0.1
     )
-    torch.testing.assert_close(
-        triton_scales, helion_scales, atol=1e-6, rtol=1e-4
-    )
+    torch.testing.assert_close(triton_scales, helion_scales, atol=1e-6, rtol=1e-4)
