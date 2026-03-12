@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the fused BMM + FP8 static quantization kernels (Triton & Helion)."""
+"""Tests for fused BMM + FP8 quantization kernels (static & per-group)."""
 
 import pytest
 import torch
@@ -202,4 +202,231 @@ def test_triton_vs_helion_consistency(B):
 
     torch.testing.assert_close(
         triton_out.float(), helion_flat.float(), atol=1.0, rtol=0.1
+    )
+
+
+# ── Per-group FP8 quantization tests ────────────────────────────────────────
+
+
+def _reference_bmm_fp8_group(input_tensor, weight):
+    """Reference: torch.bmm then per-group (per-head) dynamic FP8 quant."""
+    fp8_dtype = current_platform.fp8_dtype()
+    N, B, _L = input_tensor.shape
+    V = weight.shape[2]
+
+    ref_bmm = torch.bmm(input_tensor, weight)  # (N, B, V)
+    ref_bf16 = ref_bmm.transpose(0, 1)  # (B, N, V)
+
+    _, fp8_max = get_fp8_min_max()
+
+    # Per-group: one scale per (batch, head), computed from V elements
+    abs_max = ref_bf16.float().abs().amax(dim=-1)  # (B, N)
+    abs_max = abs_max.clamp(min=1e-12)
+    scales = abs_max / fp8_max  # (B, N)
+    inv_scales = fp8_max / abs_max  # (B, N)
+
+    ref_scaled = (ref_bf16.float() * inv_scales.unsqueeze(-1)).clamp(
+        -fp8_max, fp8_max
+    )
+    ref_fp8 = ref_scaled.reshape(B, N * V).to(fp8_dtype)
+    return ref_fp8, scales
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+@pytest.mark.parametrize("B", [1, 7, 32, 256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_triton_bmm_fp8_group_quant_correctness(B, dtype):
+    """Test Triton fused BMM + per-group FP8 matches reference."""
+    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_group_quant
+
+    N, L, V = DEFAULT_N, DEFAULT_L, DEFAULT_V
+    device = torch.device("cuda:0")
+    torch.manual_seed(42)
+
+    input_tensor = torch.randn(N, B, L, dtype=dtype, device=device)
+    weight = torch.randn(N, L, V, dtype=dtype, device=device)
+
+    ref_fp8, ref_scales = _reference_bmm_fp8_group(input_tensor, weight)
+
+    fp8_dtype = current_platform.fp8_dtype()
+    fused_output = torch.empty(B, N * V, dtype=fp8_dtype, device=device)
+    fused_scales = torch.empty(B, N, dtype=torch.float32, device=device)
+    bmm_fp8_group_quant(input_tensor, weight, fused_output, fused_scales)
+
+    # Check FP8 values match
+    torch.testing.assert_close(
+        fused_output.float(), ref_fp8.float(), atol=1.0, rtol=0.1
+    )
+    # Check scales match
+    torch.testing.assert_close(
+        fused_scales, ref_scales, atol=1e-6, rtol=1e-4
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+def test_triton_bmm_fp8_group_quant_shapes():
+    """Test various shapes work without errors (per-group Triton)."""
+    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_group_quant
+
+    device = torch.device("cuda:0")
+    fp8_dtype = current_platform.fp8_dtype()
+    dtype = torch.bfloat16
+
+    shapes = [
+        (16, 1, 512, 128),
+        (16, 128, 512, 128),
+        (128, 1, 512, 128),
+        (64, 32, 512, 128),
+    ]
+
+    for N, B, L, V in shapes:
+        inp = torch.randn(N, B, L, dtype=dtype, device=device)
+        w = torch.randn(N, L, V, dtype=dtype, device=device)
+        out = torch.empty(B, N * V, dtype=fp8_dtype, device=device)
+        scales = torch.empty(B, N, dtype=torch.float32, device=device)
+        bmm_fp8_group_quant(inp, w, out, scales)
+        assert out.shape == (B, N * V)
+        assert out.dtype == fp8_dtype
+        assert scales.shape == (B, N)
+        assert scales.dtype == torch.float32
+        # Scales should be positive
+        assert (scales > 0).all()
+
+
+# ── Helion per-group tests ──────────────────────────────────────────────────
+
+
+def _skip_if_helion_group_unavailable():
+    """Skip test if Helion is not installed or group-quant configs missing."""
+    if not has_helion():
+        pytest.skip("Helion not installed (pip install helion)")
+
+    try:
+        from vllm.kernels.helion.config_manager import ConfigManager
+        from vllm.kernels.helion.utils import get_canonical_gpu_name
+
+        platform = get_canonical_gpu_name()
+        try:
+            config_manager = ConfigManager.get_instance()
+        except RuntimeError:
+            config_manager = ConfigManager()
+
+        configs = config_manager.get_platform_configs(
+            "bmm_fp8_group_quant_helion", platform
+        )
+        if len(configs) == 0:
+            pytest.skip(
+                f"No Helion configs for bmm_fp8_group_quant_helion on "
+                f"{platform}. Run: python scripts/autotune_helion_kernels.py "
+                "--kernels bmm_fp8_group_quant_helion"
+            )
+    except (ImportError, RuntimeError, KeyError):
+        pytest.skip("Error detecting Helion platform support")
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+@pytest.mark.parametrize("B", [1, 7, 32, 256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_helion_bmm_fp8_group_quant_correctness(B, dtype):
+    """Test Helion fused BMM + per-group FP8 matches reference."""
+    _skip_if_helion_group_unavailable()
+
+    from vllm.kernels.helion.ops.bmm_fp8_quant import (
+        bmm_fp8_group_quant_helion,
+    )
+
+    N, L, V = DEFAULT_N, DEFAULT_L, DEFAULT_V
+    device = torch.device("cuda:0")
+    torch.manual_seed(42)
+
+    input_tensor = torch.randn(N, B, L, dtype=dtype, device=device)
+    weight = torch.randn(N, L, V, dtype=dtype, device=device)
+
+    ref_fp8, ref_scales = _reference_bmm_fp8_group(input_tensor, weight)
+
+    helion_out, helion_scales = bmm_fp8_group_quant_helion(
+        input_tensor, weight
+    )
+    helion_flat = helion_out.reshape(B, N * V)
+
+    torch.testing.assert_close(
+        helion_flat.float(), ref_fp8.float(), atol=1.0, rtol=0.1
+    )
+    torch.testing.assert_close(
+        helion_scales, ref_scales, atol=1e-6, rtol=1e-4
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+def test_helion_bmm_fp8_group_quant_shapes():
+    """Test various shapes work without errors (per-group Helion)."""
+    _skip_if_helion_group_unavailable()
+
+    from vllm.kernels.helion.ops.bmm_fp8_quant import (
+        bmm_fp8_group_quant_helion,
+    )
+
+    device = torch.device("cuda:0")
+    fp8_dtype = torch.float8_e4m3fn
+    dtype = torch.bfloat16
+
+    shapes = [
+        (16, 1, 512, 128),
+        (16, 128, 512, 128),
+        (128, 1, 512, 128),
+    ]
+
+    for N, B, L, V in shapes:
+        inp = torch.randn(N, B, L, dtype=dtype, device=device)
+        w = torch.randn(N, L, V, dtype=dtype, device=device)
+        out, scales = bmm_fp8_group_quant_helion(inp, w)
+        assert out.reshape(B, N * V).shape == (B, N * V)
+        assert out.dtype == fp8_dtype
+        assert scales.shape == (B, N)
+        assert (scales > 0).all()
+
+
+# ── Per-group cross-kernel consistency ──────────────────────────────────────
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+@pytest.mark.parametrize("B", [1, 32, 128])
+def test_triton_vs_helion_group_quant_consistency(B):
+    """Verify Triton and Helion per-group kernels produce identical results."""
+    _skip_if_helion_group_unavailable()
+
+    from vllm.kernels.helion.ops.bmm_fp8_quant import (
+        bmm_fp8_group_quant_helion,
+    )
+    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_group_quant
+
+    N, L, V = DEFAULT_N, DEFAULT_L, DEFAULT_V
+    device = torch.device("cuda:0")
+    fp8_dtype = current_platform.fp8_dtype()
+    torch.manual_seed(42)
+
+    input_tensor = torch.randn(N, B, L, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(N, L, V, dtype=torch.bfloat16, device=device)
+
+    # Triton
+    triton_out = torch.empty(B, N * V, dtype=fp8_dtype, device=device)
+    triton_scales = torch.empty(B, N, dtype=torch.float32, device=device)
+    bmm_fp8_group_quant(input_tensor, weight, triton_out, triton_scales)
+
+    # Helion
+    helion_out, helion_scales = bmm_fp8_group_quant_helion(
+        input_tensor, weight
+    )
+    helion_flat = helion_out.reshape(B, N * V)
+
+    torch.testing.assert_close(
+        triton_out.float(), helion_flat.float(), atol=1.0, rtol=0.1
+    )
+    torch.testing.assert_close(
+        triton_scales, helion_scales, atol=1e-6, rtol=1e-4
     )

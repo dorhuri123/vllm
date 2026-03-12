@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kDynamic128Scale,
     kNvfp4Dynamic,
     kStaticTensorScale,
 )
@@ -312,6 +313,107 @@ class MLAAttentionNvfp4QuantPattern(MLAAttentionQuantPattern):
         )
 
 
+class MLAAttentionFp8Dynamic128QuantPattern(MLAAttentionQuantPattern):
+    """
+    Fusion for MLA Attention+Fp8Dynamic128Quant (per-group FP8).
+
+    Matches the pattern: MLA attention -> per_token_group_fp8_quant,
+    and replaces it with MLA attention(output_block_scale=scales_buffer).
+    """
+
+    def __init__(
+        self,
+        layer: MLAAttention,
+        dtype: torch.dtype,
+        symmetric: bool = True,
+    ) -> None:
+        quant_key = QuantKey(
+            dtype=FP8_DTYPE, scale=kDynamic128Scale, symmetric=symmetric
+        )
+        super().__init__(layer, quant_key, dtype)
+        self.quant_matcher = MatcherQuantFP8(quant_key)
+
+    def _register(self, pm_pass: PatternMatcherPass) -> None:
+        # Number of scale groups = output_dim / group_size (128)
+        num_groups = self.output_dim // 128
+
+        def pattern(
+            q: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            k_pe: torch.Tensor,
+            output_attn: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at1 = auto_functionalized(
+                MLA_ATTN_OP,
+                q=q,
+                kv_c_normed=kv_c_normed,
+                k_pe=k_pe,
+                output=output_attn,
+                layer_name=self.layer_name,
+                output_scale=None,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            # MLA output is 2D (T, N*V), per_token_group_fp8_quant produces
+            # (fp8_output, scales)
+            return self.quant_matcher(at1[1])
+
+        def replacement(
+            q: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            k_pe: torch.Tensor,
+            output_attn: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            # MLA output in FP8
+            output_attn = torch.ops.aten.full.default(
+                [q.shape[0], self.output_dim],
+                0.0,
+                dtype=self.quant_dtype,
+                device=q.device,
+            )
+            # Per-group scales: (T, num_groups) in float32
+            output_scales = torch.ops.aten.full.default(
+                [q.shape[0], num_groups],
+                0.0,
+                dtype=torch.float32,
+                device=q.device,
+            )
+            at1 = auto_functionalized(
+                MLA_ATTN_OP,
+                q=q,
+                kv_c_normed=kv_c_normed,
+                k_pe=k_pe,
+                output=output_attn,
+                layer_name=self.layer_name,
+                output_scale=None,
+                output_block_scale=output_scales,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return at1[1], at1[2]
+
+        inputs = [
+            self.empty(5, self.num_heads, self.qk_head_dim),  # q
+            self.empty(5, self.kv_lora_rank),  # kv_c_normed
+            self.empty(5, 1, self.qk_rope_head_dim),  # k_pe
+            self.empty(5, self.output_dim),  # output_attn
+            self.empty(0),  # kv_cache_dummy_dep
+        ]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            MLAAttentionQuantPattern.wrap_trace_fn(
+                pm.fwd_only,
+                MLAAttentionQuantPattern.fx_view_to_reshape,
+                MLAAttentionQuantPattern.remove_noop_permutes,
+            ),
+            pm_pass,
+        )
+
+
 class MLAAttnFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses post-attention quantization onto MLA attention if supported.
@@ -333,6 +435,12 @@ class MLAAttnFusionPass(VllmPatternMatcherPass):
                 layer, config.model_config.dtype
             )
             pattern_fp8.register_if_supported(self.patterns)
+
+            if current_platform.is_cuda():
+                pattern_fp8_group = MLAAttentionFp8Dynamic128QuantPattern(
+                    layer, config.model_config.dtype
+                )
+                pattern_fp8_group.register_if_supported(self.patterns)
 
             if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
                 pattern_nvfp4 = MLAAttentionNvfp4QuantPattern(
@@ -360,5 +468,6 @@ class MLAAttnFusionPass(VllmPatternMatcherPass):
             self,
             MLAAttentionQuantPattern,
             MLAAttentionFp8StaticQuantPattern,
+            MLAAttentionFp8Dynamic128QuantPattern,
             MLAAttentionNvfp4QuantPattern,
         )

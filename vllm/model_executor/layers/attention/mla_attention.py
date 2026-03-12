@@ -596,6 +596,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         mqa_fused = False
+        _is_per_group_fp8 = (
+            output_block_scale is not None
+            and output_scale is None
+            and output_block_scale.dtype == torch.float32
+        )
         if num_mqa_tokens > 0:
             mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
@@ -689,13 +694,30 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     )
 
             # v_up projection
-            # For FP8 static quant on the decode path, fuse quant into BMM
+            # For FP8 quant on the decode path, fuse quant into BMM
             if (
+                needs_quant
+                and _is_per_group_fp8
+                and not self.is_aiter_triton_fp4_bmm_enabled
+                and not self.is_aiter_triton_fp8_bmm_enabled
+            ):
+                # Per-group dynamic FP8 fused path
+                self._v_up_proj(
+                    attn_out,
+                    out=mqa_output_slice,
+                    quant_output=quant_output[:num_mqa_tokens],
+                    output_group_scale=output_block_scale[
+                        :num_mqa_tokens
+                    ],
+                )
+                mqa_fused = True
+            elif (
                 needs_quant
                 and output_block_scale is None
                 and not self.is_aiter_triton_fp4_bmm_enabled
                 and not self.is_aiter_triton_fp8_bmm_enabled
             ):
+                # Static per-tensor FP8 fused path
                 self._v_up_proj(
                     attn_out,
                     out=mqa_output_slice,
@@ -718,15 +740,52 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mha_quant = quant_output[num_mqa_tokens:num_actual_toks].reshape(
                         -1, self.num_heads * self.v_head_dim
                     )
-                    torch.ops._C.static_scaled_fp8_quant(
-                        mha_quant, mha_actual, output_scale
-                    )
+                    if _is_per_group_fp8:
+                        # Per-group dynamic FP8 for MHA portion
+                        mha_scales = output_block_scale[
+                            num_mqa_tokens:num_actual_toks
+                        ]
+                        fp8_info = torch.finfo(quant_output.dtype)
+                        torch.ops._C.per_token_group_fp8_quant(
+                            mha_actual,
+                            mha_quant,
+                            mha_scales,
+                            self.v_head_dim,
+                            1e-12,
+                            fp8_info.min,
+                            fp8_info.max,
+                            False,
+                            False,
+                            False,
+                        )
+                    else:
+                        torch.ops._C.static_scaled_fp8_quant(
+                            mha_quant, mha_actual, output_scale
+                        )
             else:
                 # Fallback: quantize the full output (both MQA and MHA)
                 actual = output[:num_actual_toks].reshape(
                     -1, self.num_heads * self.v_head_dim
                 )
-                if output_block_scale is not None:
+                if output_block_scale is not None and _is_per_group_fp8:
+                    # Per-group dynamic FP8 quantization
+                    quant_actual = quant_output[:num_actual_toks].reshape(
+                        -1, self.num_heads * self.v_head_dim
+                    )
+                    fp8_info = torch.finfo(quant_output.dtype)
+                    torch.ops._C.per_token_group_fp8_quant(
+                        actual,
+                        quant_actual,
+                        output_block_scale[:num_actual_toks],
+                        self.v_head_dim,
+                        1e-12,
+                        fp8_info.min,
+                        fp8_info.max,
+                        False,
+                        False,
+                        False,
+                    )
+                elif output_block_scale is not None:
                     # NVFP4: two FP4 values packed into one uint8
                     from vllm._custom_ops import scaled_fp4_quant
 
@@ -890,11 +949,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         out: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         quant_output: torch.Tensor | None = None,
+        output_group_scale: torch.Tensor | None = None,
     ):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
 
-        # Fused BMM + FP8 quant path: skip the bf16 intermediate entirely
+        # Fused BMM + per-group dynamic FP8 quant path
+        if output_group_scale is not None and quant_output is not None:
+            from vllm.v1.attention.ops.triton_bmm_fp8 import (
+                bmm_fp8_group_quant,
+            )
+
+            bmm_fp8_group_quant(
+                x, self.W_UV, quant_output, output_group_scale
+            )
+            return
+
+        # Fused BMM + static per-tensor FP8 quant path
         if output_scale is not None and quant_output is not None:
             from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_quant
 
@@ -2103,11 +2174,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
     def fused_output_quant_supported(self, quant_key):
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Dynamic128Sym,
             kFp8StaticTensorSym,
             kNvfp4Dynamic,
         )
 
-        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+        return quant_key in (
+            kFp8StaticTensorSym,
+            kFp8Dynamic128Sym,
+            kNvfp4Dynamic,
+        )
 
     def __init__(
         self,
