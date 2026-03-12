@@ -188,17 +188,16 @@ def bmm_fp8_group_quant_helion(
         result_f32 = result.to(torch.float32)
 
         # Per-group: compute abs_max over V dim for each (n, b)
-        abs_max = result_f32.abs().amax(dim=-1)  # (tile_n, tile_b)
+        # Use keepdim=True to keep 3D shape — avoids unsqueeze which
+        # triggers a Helion codegen bug with 2D→3D broadcasting.
+        abs_max = result_f32.abs().amax(dim=-1, keepdim=True)  # (tile_n, tile_b, 1)
         abs_max = abs_max.clamp(min=1e-12)
-        group_scale = abs_max / _FP8_MAX  # (tile_n, tile_b)
-        inv_scale = _FP8_MAX / abs_max  # (tile_n, tile_b)
+        inv_scale = _FP8_MAX / abs_max  # (tile_n, tile_b, 1) — broadcasts naturally
 
-        result_scaled = (result_f32 * inv_scale.unsqueeze(-1)).clamp(
-            -_FP8_MAX, _FP8_MAX
-        )
+        result_scaled = (result_f32 * inv_scale).clamp(-_FP8_MAX, _FP8_MAX)
 
         out[tile_n, tile_b, :] = result_scaled.to(out.dtype)
-        scales[tile_n, tile_b] = group_scale
+        scales[tile_n, tile_b] = abs_max.squeeze(-1) / _FP8_MAX
 
     return out.permute(1, 0, 2).contiguous(), scales.permute(1, 0).contiguous()
 
