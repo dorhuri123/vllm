@@ -257,8 +257,9 @@ def test_triton_bmm_fp8_group_quant_correctness(B, dtype):
     fused_scales = torch.empty(B, N, dtype=torch.float32, device=device)
     bmm_fp8_group_quant(input_tensor, weight, fused_output, fused_scales)
 
-    # Check scales match (these are float32, should be very close)
-    torch.testing.assert_close(fused_scales, ref_scales, atol=1e-4, rtol=1e-3)
+    # Check scales match. Triton loads bf16 inputs into fp32 dot products,
+    # which can differ slightly from pure fp32 torch.bmm, affecting abs_max.
+    torch.testing.assert_close(fused_scales, ref_scales, atol=1e-3, rtol=1e-2)
 
     # Compare dequantized values rather than raw FP8.
     # FP8 e4m3fn has large gaps between representable values near the max
