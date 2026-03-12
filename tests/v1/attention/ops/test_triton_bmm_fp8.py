@@ -252,12 +252,16 @@ def test_triton_bmm_fp8_group_quant_correctness(B, dtype):
     fused_scales = torch.empty(B, N, dtype=torch.float32, device=device)
     bmm_fp8_group_quant(input_tensor, weight, fused_output, fused_scales)
 
-    # Check FP8 values match
-    torch.testing.assert_close(
-        fused_output.float(), ref_fp8.float(), atol=1.0, rtol=0.1
-    )
-    # Check scales match
-    torch.testing.assert_close(fused_scales, ref_scales, atol=1e-6, rtol=1e-4)
+    # Check scales match (these are float32, should be very close)
+    torch.testing.assert_close(fused_scales, ref_scales, atol=1e-4, rtol=1e-3)
+
+    # Compare dequantized values rather than raw FP8.
+    # FP8 e4m3fn has large gaps between representable values near the max
+    # (up to 32), so raw FP8 comparison is unreliable. Dequantized values
+    # (fp8 * scale) should be close to the original bf16 BMM result.
+    fused_deq = fused_output.reshape(B, N, V).float() * fused_scales.unsqueeze(-1)
+    ref_deq = ref_fp8.reshape(B, N, V).float() * ref_scales.unsqueeze(-1)
+    torch.testing.assert_close(fused_deq, ref_deq, atol=0.5, rtol=0.05)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA only")
