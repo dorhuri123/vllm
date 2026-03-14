@@ -39,7 +39,7 @@ def _reference_bmm_fp8(input_tensor, weight, scale):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_triton_bmm_fp8_quant_correctness(B, dtype):
     """Test that Triton fused BMM+FP8 matches the reference."""
-    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_quant
+    from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_quant
 
     N, L, V = DEFAULT_N, DEFAULT_L, DEFAULT_V
     device = torch.device("cuda:0")
@@ -64,7 +64,7 @@ def test_triton_bmm_fp8_quant_correctness(B, dtype):
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 def test_triton_bmm_fp8_quant_shapes():
     """Test various shapes work without errors (Triton)."""
-    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_quant
+    from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_quant
 
     device = torch.device("cuda:0")
     fp8_dtype = current_platform.fp8_dtype()
@@ -181,7 +181,7 @@ def test_triton_vs_helion_consistency(B):
     _skip_if_helion_unavailable()
 
     from vllm.kernels.helion.ops.bmm_fp8_quant import bmm_fp8_quant_helion
-    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_quant
+    from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_quant
 
     N, L, V = DEFAULT_N, DEFAULT_L, DEFAULT_V
     device = torch.device("cuda:0")
@@ -241,7 +241,7 @@ def _reference_bmm_fp8_group(input_tensor, weight):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_triton_bmm_fp8_group_quant_correctness(B, dtype):
     """Test Triton fused BMM + per-group FP8 matches reference."""
-    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_group_quant
+    from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_group_quant
 
     N, L, V = DEFAULT_N, DEFAULT_L, DEFAULT_V
     device = torch.device("cuda:0")
@@ -274,7 +274,7 @@ def test_triton_bmm_fp8_group_quant_correctness(B, dtype):
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 def test_triton_bmm_fp8_group_quant_shapes():
     """Test various shapes work without errors (per-group Triton)."""
-    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_group_quant
+    from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_group_quant
 
     device = torch.device("cuda:0")
     fp8_dtype = current_platform.fp8_dtype()
@@ -408,7 +408,7 @@ def test_triton_vs_helion_group_quant_consistency(B):
     from vllm.kernels.helion.ops.bmm_fp8_quant import (
         bmm_fp8_group_quant_helion,
     )
-    from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_group_quant
+    from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_group_quant
 
     N, L, V = DEFAULT_N, DEFAULT_L, DEFAULT_V
     device = torch.device("cuda:0")

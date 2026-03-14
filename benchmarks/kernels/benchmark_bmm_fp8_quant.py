@@ -20,16 +20,16 @@ Usage:
 import torch
 
 from vllm._custom_ops import scaled_fp8_quant
+from vllm.kernels.triton.ops.bmm_fp8_quant import (
+    bmm_fp8_group_quant,
+    bmm_fp8_quant,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton as vllm_triton
 from vllm.utils.import_utils import has_helion
-from vllm.v1.attention.ops.triton_bmm_fp8 import (
-    bmm_fp8_group_quant,
-    bmm_fp8_quant,
-)
 
 # DeepSeek-V3/R1 MLA dimensions
 N_HEADS = [16, 64, 128]

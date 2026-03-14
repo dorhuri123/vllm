@@ -954,7 +954,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Fused BMM + per-group dynamic FP8 quant path
         if output_group_scale is not None and quant_output is not None:
-            from vllm.v1.attention.ops.triton_bmm_fp8 import (
+            from vllm.kernels.triton.ops.bmm_fp8_quant import (
                 bmm_fp8_group_quant,
             )
 
@@ -963,7 +963,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Fused BMM + static per-tensor FP8 quant path
         if output_scale is not None and quant_output is not None:
-            from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_quant
+            from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_quant
 
             bmm_fp8_quant(x, self.W_UV, output_scale, quant_output)
             return

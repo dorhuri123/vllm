@@ -3,7 +3,7 @@
 """
 Helion kernels for fused batched matrix multiply + FP8 quantization.
 
-Equivalent to the Triton kernels in vllm/v1/attention/ops/triton_bmm_fp8.py,
+Equivalent to the Triton kernels in vllm/kernels/triton/ops/bmm_fp8_quant.py,
 but written using Helion's higher-level API for portability and maintainability.
 
 Used by MLA's _v_up_proj to fuse the V up-projection BMM with the
